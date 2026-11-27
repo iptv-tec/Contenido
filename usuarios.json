@@ -1,3 +1,11 @@
 {
-  "usuarios": []
+  "usuarios": [
+    {
+      "user": "Juan",
+      "pass": "123456",
+      "vencimiento": "2026-12-27T11:04:34.008Z",
+      "max_pantallas": 1,
+      "dispositivos": []
+    }
+  ]
 }
