@@ -1,8 +1,9 @@
-// proveedor_cinehax.js — catálogo de películas y series (cinehax.com)
-// Lo descarga y guarda en caché la app; se vuelve a bajar solo si cambia "cinehax_version" en version.json
 (function () {
   const PH = window.PH;
   const BASE = 'https://cinehax.com';
+
+  const TMDB_KEY = '47fbef4ea90e936442ed15a9550ccc45';
+  const TMDB_IMG = 'https://image.tmdb.org/t/p/w500';
 
   const GENRES = [
     ['movie:action', 'Películas: Acción'], ['movie:adventure', 'Películas: Aventura'],
@@ -16,6 +17,11 @@
     const t = document.createElement('textarea');
     t.innerHTML = s;
     return t.value;
+  }
+
+  async function tmdb(path, lang) {
+    const raw = await PH.httpGet(`https://api.themoviedb.org/3${path}?api_key=${TMDB_KEY}&language=${lang || 'es-MX'}`, null);
+    return JSON.parse(raw);
   }
 
   function parseCard(a) {
@@ -32,7 +38,6 @@
     return { id, type: isTv ? 'tv' : 'movie', title, poster };
   }
 
-  // Inicio: devuelve [{ name, list: [show] }] filtrado por 'movie' o 'tv'
   async function home(filterType) {
     const isMovie = filterType === 'movie';
     const html = await PH.httpGet(BASE + '/', BASE + '/');
@@ -62,7 +67,6 @@
     return categories;
   }
 
-  // Explorar por tipo / género / texto
   async function explore(type, page, genre, q) {
     genre = genre || ''; q = q || '';
     const params = `page=${page}&type=${type}&genre=${genre}&network=&language=&sort=popular&time=week&q=${encodeURIComponent(q)}`;
@@ -81,7 +85,6 @@
     } catch (e) { return []; }
   }
 
-  // Búsqueda en vivo (TMDB vía cinehax)
   async function search(q) {
     const shows = [];
     try {
@@ -96,7 +99,7 @@
           });
         });
       }
-    } catch (e) { /* sin resultados */ }
+    } catch (e) { }
     return shows;
   }
 
@@ -109,24 +112,40 @@
     return html;
   }
 
-  // Ficha: sinopsis y, para series, números de temporada
+  const esPromo = t => /cine\s*hax/i.test(t || '');
+
   async function detail(type, id) {
     const urls = type === 'tv'
       ? [`${BASE}/serie/${id}/`, `${BASE}/ver/?tipo=serie&id=${id}`]
       : [`${BASE}/pelicula/${id}/`, `${BASE}/ver/?tipo=pelicula&id=${id}`];
     const html = await fetchFirst(urls);
     if (!html) throw new Error('No se pudo cargar la ficha.');
+    const doc = new DOMParser().parseFromString(html, 'text/html');
 
     let overview = '';
-    const m = html.match(/Descripción<\/h3>\s*<p[^>]*>([^<]*)<\/p>/);
-    if (m) overview = m[1];
-    const doc = new DOMParser().parseFromString(html, 'text/html');
-    if (!overview) {
-      const d = doc.querySelector('.description, .synopsis, .overview');
-      if (d) overview = d.textContent;
+
+    if (TMDB_KEY) {
+      for (const lang of ['es-MX', 'es-ES']) {
+        try { const j = await tmdb(`/${type === 'tv' ? 'tv' : 'movie'}/${id}`, lang); if (j && j.overview) { overview = j.overview; break; } } catch (e) { }
+      }
     }
     if (!overview) {
-      const ps = Array.from(doc.querySelectorAll('p'));
+      const m = html.match(/Descripción<\/h3>\s*<p[^>]*>([^<]*)<\/p>/);
+      if (m && !esPromo(m[1])) overview = m[1];
+    }
+    if (!overview) {
+      for (const h of doc.querySelectorAll('h1,h2,h3,h4')) {
+        if (!/^(descripci[oó]n|sinopsis)$/i.test(h.textContent.trim())) continue;
+        const p = h.nextElementSibling;
+        if (p && p.textContent.trim().length > 30 && !esPromo(p.textContent)) { overview = p.textContent; break; }
+      }
+    }
+    if (!overview) {
+      const d = doc.querySelector('.description, .synopsis, .overview');
+      if (d && !esPromo(d.textContent)) overview = d.textContent;
+    }
+    if (!overview) {
+      const ps = Array.from(doc.querySelectorAll('p')).filter(p => !esPromo(p.textContent));
       const longest = ps.reduce((a, b) => a.textContent.length > b.textContent.length ? a : b, { textContent: '' });
       if (longest.textContent.length > 50) overview = longest.textContent;
     }
@@ -143,8 +162,28 @@
     return { overview, seasons };
   }
 
-  // Episodios de una temporada: [{ number, title }]
+  function splitEp(text) {
+    let t = String(text || '').replace(/\s+/g, ' ').trim().replace(/^E\d+\s*/i, '');
+    let runtime = '';
+    const m = t.match(/^(.*?)\s*((?:\d+\s*h\s*)?\d+\s*min)\b.*$/i);
+    if (m) { t = m[1].trim(); runtime = m[2].replace(/\s+/g, ' '); }
+    return { title: t, runtime };
+  }
+
   async function episodes(tvId, season) {
+    if (TMDB_KEY) {
+      try {
+        const j = await tmdb(`/tv/${tvId}/season/${season}`);
+        if (j && Array.isArray(j.episodes) && j.episodes.length) {
+          return j.episodes.map(e => ({
+            number: e.episode_number,
+            title: e.name || 'Episodio ' + e.episode_number,
+            runtime: e.runtime ? e.runtime + ' min' : '',
+            thumbnail: e.still_path ? TMDB_IMG + e.still_path : ''
+          }));
+        }
+      } catch (e) { }
+    }
     const urls = [
       `${BASE}/serie/${tvId}/temporada-${season}/episodio-1/`,
       `${BASE}/serie/${tvId}/`,
@@ -163,9 +202,11 @@
       const label = (a.getAttribute('aria-label') || '') + ' ' + text;
       const isSeasonChip = /temporada/i.test(label) && !a.querySelector('span') && text.length <= 4;
       if (isSeasonChip) return;
-      let t = text.replace(/^E\d+\s*/i, '').trim();
+      let { title: t, runtime } = splitEp(text);
       if (!t || /^(?:T\d+|E\d+|Temporada\s*\d+)$/i.test(t)) t = 'Episodio ' + number;
-      if (!out.has(number)) out.set(number, { number, title: t });
+      const im = a.querySelector('img');
+      const thumbnail = im ? PH.fixUrl(im.getAttribute('data-src') || im.getAttribute('src') || '', BASE) : '';
+      if (!out.has(number)) out.set(number, { number, title: t, runtime, thumbnail });
     });
     return [...out.values()].sort((a, b) => a.number - b.number);
   }
